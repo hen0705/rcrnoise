@@ -32,10 +32,21 @@
 #       Rscript 02_apply_equine_weighting.R path/to/one_file.csv
 #
 # Expected folder layout:
-#   data/ltsa_raw/        <- put ALL your LTSA CSVs here, any file names
-#   data/ltsa_processed/  <- this script writes CSV outputs here
-#   figures/              <- this script writes PNG outputs here
-#   equine_weighting_model.csv   <- from script 01, lives at repo root
+#   I:/RCR_Acoustics/ltsa_raw/  <- raw LTSA CSVs live here (external drive,
+#                                  NOT committed to the GitHub repo - kept
+#                                  out per the earlier size/portability
+#                                  discussion)
+#   data/ltsa_processed/        <- this script writes CSV outputs here
+#                                  (relative to the repo - fine to commit,
+#                                  these are much smaller)
+#   figures/                    <- this script writes PNG outputs here
+#   equine_weighting_model.csv  <- from script 01, lives at repo root
+#
+# NOTE: input_dir below is an absolute, machine-specific path. This script
+# will only run correctly on a machine where that drive letter/path exists
+# exactly as written - it will NOT work unmodified on a collaborator's
+# machine with a different drive mapping. If that becomes a problem,
+# consider an environment variable or a config file instead of hardcoding it.
 #
 # Confirmed input LTSA format:
 #   CSV, wide format:
@@ -65,7 +76,7 @@ library(tidyverse)
 
 # ---- Paths (edit if your folder layout differs) -----------------------------
 
-input_dir   <- "data/ltsa_raw"
+input_dir   <- "I:/RCR_Acoustics/ltsa_raw"
 output_dir  <- "data/ltsa_processed"
 figures_dir <- "figures"
 model_file  <- "equine_weighting_model.csv"
