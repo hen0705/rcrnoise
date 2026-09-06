@@ -7,40 +7,36 @@
 #   audiogram (threshold vs. frequency).
 #
 # Input:
-#   WebPlotDigitizerHorseAudiogram.csv
+#   data/audiogram/WebPlotDigitizerHorseAudiogram.csv
 #     Two columns, NO header: frequency (kHz), threshold (dB)
 #
 # Output:
-#   equine_weighting_model.csv
+#   equine_weighting_model.csv  (repo root - script 02 reads this)
 #     Columns: frequency_hz, threshold_db, H_dB
-#     A smooth lookup table (regular in log10-frequency) that can later be
-#     interpolated onto ANY LTSA's frequency bins (see script 02).
+#   figures/audiogram_raw_vs_smoothed.png
+#   figures/equine_hweighting_curve.png
 #
 # Method:
 #   1. Read + clean digitized points; convert kHz -> Hz
 #   2. Collapse duplicate/near-duplicate frequencies (digitizing jitter)
 #   3. Interpolate (linear) in log10(frequency) onto a regular grid
 #   4. Light loess smoothing in log10(frequency) to remove residual
-#      digitizing "overshoot" (small manual-digitizing wiggles), while
-#      preserving the real U-shape of the audiogram
+#      digitizing "overshoot", while preserving the real U-shape
 #   5. Compute H(f) = Tmin - T(f)
-#        Tmin = best (lowest) threshold across the whole curve
-#        T(f) = threshold at frequency f
-#      -> H(f) = 0 dB at the most sensitive frequency, increasingly
-#         negative (attenuated) elsewhere - same shape convention as the
-#         human A-weighting curve (which is 0 dB near 1-4 kHz and negative
-#         elsewhere).
 # =============================================================================
 
 library(tidyverse)
 
 # ---- Parameters you may want to tune ---------------------------------------
 
-input_file   <- "WebPlotDigitizerHorseAudiogram.csv"
+input_file   <- "data/audiogram/WebPlotDigitizerHorseAudiogram.csv"
 output_file  <- "equine_weighting_model.csv"
+figures_dir  <- "figures"
 n_bins       <- 300   # log-frequency bins used to collapse digitizing jitter
 grid_n       <- 1000  # resolution of the final interpolated model
 loess_span   <- 0.08  # smoothing span (larger = smoother, more flattening)
+
+dir.create(figures_dir, showWarnings = FALSE, recursive = TRUE)
 
 # ---- 1. Read raw digitized data --------------------------------------------
 
@@ -56,12 +52,8 @@ audiogram <- raw %>%
   arrange(freq_hz)
 
 # ---- 2. Collapse duplicate / near-duplicate frequencies --------------------
-# WebPlotDigitizer traces frequently produce several points essentially on
-# top of one another in x (frequency) with slightly different y (threshold),
-# and occasionally a few points that are locally non-monotonic in x. This is
-# digitizing jitter, not signal, and is the source of the "overshoot" you
-# saw. Binning in log10(f) and taking the median threshold per bin fixes
-# both problems (removes jitter, restores monotonicity in x) in one step.
+# Binning in log10(f) and taking the median threshold per bin removes both
+# digitizing jitter and the "overshoot" from locally non-monotonic x.
 
 audiogram_binned <- audiogram %>%
   mutate(log10_f = log10(freq_hz)) %>%
@@ -87,7 +79,7 @@ interp <- approx(
   y      = audiogram_binned$threshold_db,
   xout   = log10_f_grid,
   method = "linear",
-  rule   = 2  # clamp at edges rather than extrapolate
+  rule   = 2
 )
 
 model <- tibble(
@@ -121,7 +113,7 @@ equine_model <- model %>%
 
 write_csv(equine_model, output_file)
 
-# ---- Quick check plot -------------------------------------------------------
+# ---- 6. Figures - saved to disk, not just displayed ------------------------
 
 p_check <- ggplot() +
   geom_point(
@@ -148,5 +140,11 @@ p_hweight <- ggplot(equine_model, aes(frequency_hz, H_dB)) +
   ) +
   theme_minimal()
 
-print(p_check)
-print(p_hweight)
+ggsave(file.path(figures_dir, "audiogram_raw_vs_smoothed.png"),
+       p_check, width = 8, height = 5, dpi = 300)
+
+ggsave(file.path(figures_dir, "equine_hweighting_curve.png"),
+       p_hweight, width = 8, height = 5, dpi = 300)
+
+message("Model written to ", output_file)
+message("Figures written to ", figures_dir, "/")
