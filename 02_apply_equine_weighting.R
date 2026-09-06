@@ -2,148 +2,187 @@
 # 02_apply_equine_weighting.R
 #
 # Purpose:
-#   Apply the equine H-weighting curve (built in 01_build_equine_model.R) to
-#   a 24-hr LTSA (long-term spectral average) to compute an equine-
-#   perceptually-weighted broadband level - directly analogous to how dBA is
-#   computed from an unweighted spectrum using the A-weighting curve.
+#   Apply the equine H-weighting curve (built by 01_build_equine_model.R) to
+#   one or more 24-hr LTSA CSVs, producing per-file:
+#     - a broadband "equine-weighted vs. unweighted" time series
+#     - a full equine-weighted spectrogram
 #
-# Input:
-#   - equine_weighting_model.csv   (frequency_hz, H_dB)   <- from script 01
-#   - your LTSA. This script expects LONG format:
-#         datetime      : a time-bin identifier (POSIXct or character)
-#         frequency_hz  : numeric, Hz - the LTSA's OWN frequency bins
-#                         (these do NOT need to match the audiogram's bins;
-#                          they're interpolated onto the model below)
-#         level_db      : numeric, dB (whatever reference your LTSA uses,
-#                          e.g. dB re 1 uPa^2/Hz) - just be consistent
+# Usage:
+#   Batch mode (processes every *.csv in input_dir):
+#       Rscript 02_apply_equine_weighting.R
 #
-#     If your LTSA is in WIDE format (rows = time, one column per frequency
-#     bin, column names are the frequency in Hz), pivot it first - see the
-#     commented example below.
+#   Single-file mode (overrides input_dir for one specific file):
+#       Rscript 02_apply_equine_weighting.R path/to/one_file.csv
 #
-# Output:
-#   ltsa_equine_weighted.csv: one integrated, equine-weighted broadband
-#   level per time bin (L_equine_dB), plus (optionally) a full per-bin
-#   weighted spectrogram if you want to re-plot the LTSA itself.
+# Expected folder layout (see chat for rationale - folder-based, not
+# filename-pattern-based, so this never mistakes the model file or its own
+# outputs for LTSA input):
+#   data/ltsa_raw/        <- put ALL your LTSA CSVs here, any file names
+#   data/ltsa_processed/  <- this script writes its outputs here
+#   equine_weighting_model.csv   <- from script 01, lives at repo root
 #
-# ----------------------------------------------------------------------------
-# A NOTE ON THE MATH (this differs slightly from the original prompt, and
-# it's worth flagging why):
+# Confirmed input LTSA format (from your actual file):
+#   CSV, wide format:
+#     - column 1: timestamps like "2026-06-29 17:25:02"
+#     - remaining columns: frequency in Hz, 10 Hz spacing, 0-24000 Hz
+#       (a 0 Hz / DC bin is present and is dropped - see step 2b)
+#     - cell values: spectral level in dB (dBFS-derived)
 #
-#   H(f) as built in script 01 is a difference of two dB values
-#   (Tmin - T(f)), so it lives on a DECIBEL (logarithmic) scale, just like
-#   the human A-weighting curve A(f) does. You cannot multiply a linear
-#   power value by a dB-scale number directly - the units don't match.
+# Math (matches your notebook's Python weighting step exactly:
+# weight_linear = 10**(weight_dB/10), then sum, then 10*log10):
+#     P(f)        = 10^(level_dB(f) / 10)
+#     H_linear(f) = 10^(H_dB(f)      / 10)
+#     Pweighted(f)= P(f) * H_linear(f)
+#     Ptotal      = sum_f Pweighted(f)
+#     L_equine    = 10 * log10(Ptotal)
 #
-#   The standard way this is resolved for A-weighting (and what's used here
-#   for H-weighting) is:
-#       P(f)        = 10^(level_db(f) / 10)   # LTSA power -> linear
-#       H_linear(f) = 10^(H_dB(f)      / 10)   # H(f) dB   -> linear factor
-#       Pweighted(f)= P(f) * H_linear(f)
-#       Ptotal      = sum_f Pweighted(f)
-#       L_equine    = 10 * log10(Ptotal)
-#
-#   This is the same 4-step pattern you described (power -> weight -> sum ->
-#   log), just with H(f) converted to linear first so the multiplication is
-#   dimensionally valid. It reduces to your dBA-analogue exactly.
+# NOTE ON dBFS: these levels are relative to full-scale, not an absolute
+# SPL reference - "L_equine_dB" is a relative index unless/until the
+# recording chain is calibrated to a known SPL reference.
 # =============================================================================
 
 library(tidyverse)
 
-# ---- 0. Load the equine model -----------------------------------------------
+# ---- Paths (edit if your folder layout differs) -----------------------------
 
-equine_model <- read_csv("equine_weighting_model.csv", show_col_types = FALSE)
+input_dir  <- "data/ltsa_raw"
+output_dir <- "data/ltsa_processed"
+model_file <- "equine_weighting_model.csv"
 
-# ---- 1. Load your LTSA (EDIT THIS SECTION for your actual file/format) -----
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
 
-# --- Example: LTSA already in long format ------------------------------------
-# ltsa_long <- read_csv("my_24hr_ltsa.csv") %>%
-#   rename(
-#     datetime     = your_time_column,
-#     frequency_hz = your_freq_column,
-#     level_db     = your_level_column
-#   )
+# ---- 0. Load the equine model (once, shared across all files) --------------
 
-# --- Example: LTSA in wide format (time in rows, freq in columns, column ---
-#     names are frequency in Hz, e.g. "100", "125", "160", ...) ---------------
-# ltsa_wide <- read_csv("my_24hr_ltsa.csv")
-# ltsa_long <- ltsa_wide %>%
-#   pivot_longer(
-#     -datetime,
-#     names_to  = "frequency_hz",
-#     values_to = "level_db"
-#   ) %>%
-#   mutate(frequency_hz = as.numeric(frequency_hz))
-
-# ---- 2. Interpolate H(f) onto the LTSA's own frequency bins ----------------
-# Interpolation happens in log10(frequency), consistent with how the model
-# itself was built. rule = 2 clamps at the edges (holds the nearest
-# audiogram-derived value) rather than extrapolating past the frequency
-# range the horse audiogram actually covered - edit this if you'd rather
-# treat out-of-range bins as inaudible (see commented alternative below).
+equine_model <- read_csv(model_file, show_col_types = FALSE)
 
 get_equine_H <- function(freq_hz_query, model = equine_model) {
+  # Linear interpolation in log10(frequency); rule = 2 clamps at the edges
+  # rather than extrapolating past the digitized audiogram's range.
   approx(
     x    = log10(model$frequency_hz),
     y    = model$H_dB,
     xout = log10(freq_hz_query),
     rule = 2
   )$y
-
-  # Alternative: treat frequencies outside the digitized audiogram's range
-  # as effectively inaudible instead of clamping, e.g. by setting H to a
-  # large negative number (e.g. -80) for freq_hz_query below/above the
-  # model's min/max frequency_hz. Uncomment/adapt if that better matches
-  # your assumptions about the animal's true audible range.
 }
 
-# ---- 3. Core weighting function ---------------------------------------------
+# ---- 1. Core per-file processing function -----------------------------------
 
-apply_equine_weighting <- function(ltsa_long) {
-  ltsa_long %>%
-    mutate(H_dB = get_equine_H(frequency_hz)) %>%
+process_one_ltsa <- function(file_path, equine_model, output_dir) {
+
+  base_name <- tools::file_path_sans_ext(basename(file_path))
+  message("Processing: ", basename(file_path))
+
+  ltsa_wide_raw <- read_csv(file_path, show_col_types = FALSE)
+
+  ltsa_wide <- ltsa_wide_raw %>%
+    rename(datetime = 1) %>%
+    mutate(datetime = ymd_hms(datetime))
+    # If this produces NA timestamps for one of your files, that file's
+    # date format differs - swap in the matching lubridate parser for it,
+    # e.g. mdy_hms(), or handle it as a special case before calling this
+    # function.
+
+  ltsa_long <- ltsa_wide %>%
+    pivot_longer(-datetime, names_to = "frequency_raw", values_to = "level_db") %>%
+    mutate(frequency_hz = as.numeric(frequency_raw)) %>%
+    select(datetime, frequency_hz, level_db) %>%
+    filter(frequency_hz > 0)   # drop the 0 Hz / DC bin - see header note
+
+  freq_lookup <- tibble(frequency_hz = unique(ltsa_long$frequency_hz)) %>%
+    mutate(H_dB = get_equine_H(frequency_hz))
+
+  ltsa_long <- ltsa_long %>%
+    left_join(freq_lookup, by = "frequency_hz")
+
+  # -- Weighted spectrogram (per time x frequency bin) -----------------------
+
+  ltsa_weighted_spectrogram <- ltsa_long %>%
+    mutate(level_db_equine_weighted = level_db + H_dB)
+
+  write_csv(
+    ltsa_weighted_spectrogram,
+    file.path(output_dir, paste0(base_name, "_equine_weighted_spectrogram.csv"))
+  )
+
+  # -- Broadband time series: unweighted vs. equine-weighted -----------------
+
+  ltsa_timeseries <- ltsa_long %>%
     mutate(
-      P_linear   = 10^(level_db / 10),  # LTSA power, linear
-      H_linear   = 10^(H_dB / 10),      # equine sensitivity factor, linear
+      P_linear   = 10^(level_db / 10),
+      H_linear   = 10^(H_dB / 10),
       P_weighted = P_linear * H_linear
     ) %>%
     group_by(datetime) %>%
     summarise(
-      P_total_weighted = sum(P_weighted, na.rm = TRUE),
-      L_equine_dB       = 10 * log10(P_total_weighted),
+      L_unweighted_dB = 10 * log10(sum(P_linear, na.rm = TRUE)),
+      L_equine_dB     = 10 * log10(sum(P_weighted, na.rm = TRUE)),
       .groups = "drop"
-    )
+    ) %>%
+    arrange(datetime)
+
+  write_csv(
+    ltsa_timeseries,
+    file.path(output_dir, paste0(base_name, "_equine_weighted_timeseries.csv"))
+  )
+
+  ltsa_timeseries
 }
 
-# ---- 4. (Optional) full weighted spectrogram, per frequency bin -----------
-# Useful if you want to re-plot the LTSA itself with equine weighting
-# applied, rather than only the single integrated broadband number per time
-# bin. Because dB + dB is the same operation as (linear power * 10^(H/10))
-# converted back to dB, this per-bin version is just simple addition -
-# no need for the linear round-trip unless you're also summing across freq.
+# ---- 2. Decide which file(s) to run - batch, or single-file override ------
 
-weight_spectrogram <- function(ltsa_long) {
-  ltsa_long %>%
-    mutate(
-      H_dB                       = get_equine_H(frequency_hz),
-      level_db_equine_weighted   = level_db + H_dB
-    )
+cli_args <- commandArgs(trailingOnly = TRUE)
+
+if (length(cli_args) >= 1) {
+  files_to_process <- cli_args[1]
+} else {
+  files_to_process <- list.files(input_dir, pattern = "\\.csv$", full.names = TRUE)
 }
 
-# ---- 5. Run it ---------------------------------------------------------------
+if (length(files_to_process) == 0) {
+  stop("No CSV files found in ", input_dir,
+       " - drop your LTSA files there, or pass a single file path as an argument.")
+}
 
-# ltsa_weighted <- apply_equine_weighting(ltsa_long)
-# write_csv(ltsa_weighted, "ltsa_equine_weighted.csv")
+# ---- 3. Run it, collecting all timeseries results for a combined plot -----
 
-# ltsa_weighted_spectrogram <- weight_spectrogram(ltsa_long)
-# write_csv(ltsa_weighted_spectrogram, "ltsa_equine_weighted_spectrogram.csv")
+all_timeseries <- files_to_process %>%
+  set_names(tools::file_path_sans_ext(basename(.))) %>%
+  map(process_one_ltsa, equine_model = equine_model, output_dir = output_dir) %>%
+  list_rbind(names_to = "source_file")
 
-# ---- 6. Quick plot -----------------------------------------------------------
+write_csv(all_timeseries, file.path(output_dir, "all_files_equine_weighted_timeseries.csv"))
 
-# ggplot(ltsa_weighted, aes(datetime, L_equine_dB)) +
-#   geom_line(color = "firebrick") +
-#   labs(
-#     title = "24-hr Equine-Weighted Broadband Level",
-#     x = "Time", y = "H-weighted Level (dB)"
-#   ) +
-#   theme_minimal()
+# ---- 4. Combined plot across all processed files ---------------------------
+
+p_timeseries <- all_timeseries %>%
+  pivot_longer(
+    c(L_unweighted_dB, L_equine_dB),
+    names_to  = "weighting",
+    values_to = "level_db"
+  ) %>%
+  mutate(weighting = recode(weighting,
+    L_unweighted_dB = "Unweighted",
+    L_equine_dB     = "Equine-weighted"
+  )) %>%
+  ggplot(aes(datetime, level_db, color = weighting)) +
+  geom_line(linewidth = 0.4) +
+  facet_wrap(~source_file, scales = "free_x") +
+  labs(
+    title = "Acoustic level comparison",
+    x = "Time", y = "Relative integrated level (dB)", color = NULL
+  ) +
+  theme_minimal()
+
+print(p_timeseries)
+
+message("Done. Processed ", length(files_to_process), " file(s). Outputs in ", output_dir)
+
+# ---- 5. Sanity-check reminder ------------------------------------------------
+# Before trusting any of this beyond exploration: pick 2-3 timestamps from
+# ONE file, compute L_equine_dB for them independently in Python (same
+# model, same raw levels), and confirm the numbers agree to within
+# floating-point rounding. Silent unit mismatches (Hz vs kHz, log10 vs
+# natural log, power vs amplitude dB) are the most common way this kind of
+# pipeline goes quietly wrong, and won't show up as an R error - only as
+# numbers that are wrong by a consistent, easy-to-miss factor.
